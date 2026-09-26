@@ -2,6 +2,7 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
+#include <HTTPClient.h>
 #include <time.h>
 
 #include <IRremoteESP8266.h>
@@ -13,8 +14,17 @@
 
 // ---------------- Wi-Fi ----------------
 
-const char* WIFI_SSID     = "AP102";
-const char* WIFI_PASSWORD = "Hacker@1959";
+// const char* WIFI_SSID     = "AP102";
+// const char* WIFI_PASSWORD = "Hacker@1959";
+
+const char* WIFI_SSID = "Uesc2";
+const char* WIFI_PASSWORD = "Uesc@Convidado";
+
+
+// Portal cativo UESC
+const char* WIFI_USERNAME = "01202320094";
+const char* WIFI_USER_PASSWORD = "@PC2026.2";
+
 
 // ---------------- API ----------------
 
@@ -43,12 +53,14 @@ IRsend irsend(IR_LED_PIN);
 // COMANDO DESLIGAR
 // ------------------------------------------------------------
 
-const uint16_t RAW_OFF[] = {
-8988, 4506, 570, 560, 570, 560, 572, 560, 570, 562, 570, 560, 570, 562, 570, 562, 570, 562, 570, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 562, 570, 1706, 550, 562, 570, 562, 570, 562, 570, 1706, 550, 562, 570, 562, 570, 1708, 550, 560, 570, 1706, 550, 1706, 550, 1704, 550, 562, 570, 1704, 550, 39710, 8970, 2280, 552
-};
+const uint16_t RAW_OFF[] = { 3110, 1592, 498, 1064, 524, 1064, 526, 288, 528, 290, 530, 290, 530, 1064, 524, 290, 530, 290, 530, 1064, 522, 1064, 524, 290, 530, 1064, 524, 292, 528, 290, 530, 1062, 524, 1064, 522, 290, 530, 1064, 524, 1066, 522, 290, 530, 290, 530, 1064, 522, 290, 530, 290, 530, 290, 530, 1064, 522, 290, 530, 288, 530, 292, 528, 290, 530, 290, 530, 290, 530, 290, 530, 290, 530, 288, 530, 290, 530, 290, 528, 290, 530, 290, 530, 290, 530, 290, 530, 290, 530, 290, 530, 288, 530, 290, 530, 290, 530, 1048, 538, 290, 528, 290, 530, 290, 530, 290, 530, 288, 530, 290, 530, 290, 530, 1044, 542, 1064, 524, 288, 530, 290, 530, 290, 530, 1090, 498, 1088, 498, 290, 530, 290, 530, 1088, 500, 1088, 498, 1090, 498, 290, 530, 290, 530, 1088, 498, 1090, 498, 288, 530, 1090, 498, 288, 532, 288, 532, 288, 530, 290, 530, 290, 530, 290, 530, 290, 528, 290, 530, 170, 648, 136, 684, 156, 662, 134, 686, 162, 658, 160, 660, 164, 654, 156, 662, 164, 632, 220, 598, 228, 594, 158, 660, 226, 594, 230, 588, 230, 590, 230, 588, 324, 496, 322, 496, 324, 494, 238, 582, 322, 496, 324, 496, 324, 494, 326, 494, 324, 496, 324, 496, 324, 496, 324, 494, 1094, 494, 1092, 494, 1092, 494, 324, 496 };
+
+
 
 const uint16_t RAW_OFF_SIZE =
-    sizeof(RAW_OFF) / sizeof(RAW_OFF[0]);
+  sizeof(RAW_OFF) / sizeof(RAW_OFF[0]);
+
+
 
 
 // ------------------------------------------------------------
@@ -62,12 +74,10 @@ const uint16_t RAW_OFF_SIZE =
 // pressionar o botão de LIGAR no controle original.
 // ------------------------------------------------------------
 
-const uint16_t RAW_ON[] = {
- 8988, 4506, 570, 560, 570, 560, 572, 560, 570, 562, 570, 560, 570, 562, 570, 562, 570, 562, 570, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 1706, 550, 562, 570, 1706, 550, 562, 570, 562, 570, 562, 570, 1706, 550, 562, 570, 562, 570, 1708, 550, 560, 570, 1706, 550, 1706, 550, 1704, 550, 562, 570, 1704, 550, 39710, 8970, 2280, 552
-};
+const uint16_t RAW_ON[] = { 3088, 1618, 472, 1094, 494, 1094, 494, 326, 494, 324, 494, 326, 494, 1092, 494, 326, 494, 326, 494, 1094, 494, 1094, 494, 326, 494, 1094, 494, 326, 494, 326, 494, 1094, 494, 1094, 494, 326, 494, 1094, 494, 1094, 494, 326, 494, 326, 494, 1094, 494, 326, 494, 324, 494, 326, 494, 1094, 494, 326, 494, 326, 494, 326, 494, 326, 494, 326, 494, 326, 494, 326, 494, 324, 494, 324, 494, 326, 494, 324, 494, 324, 496, 324, 494, 324, 494, 326, 494, 324, 494, 324, 496, 324, 494, 324, 496, 324, 496, 1092, 494, 324, 494, 326, 494, 324, 496, 324, 496, 324, 498, 322, 494, 326, 494, 1092, 494, 1094, 494, 324, 496, 324, 494, 324, 494, 1092, 494, 1092, 496, 324, 496, 324, 496, 1092, 494, 1094, 494, 1094, 496, 324, 496, 324, 496, 1092, 496, 1092, 496, 328, 492, 1092, 494, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 494, 324, 496, 324, 496, 324, 496, 324, 496, 324, 494, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 494, 324, 496, 326, 494, 324, 496, 324, 496, 322, 496, 324, 496, 324, 496, 324, 496, 324, 496, 322, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 322, 496, 324, 496, 228, 592, 1114, 474, 1114, 474, 1114, 474, 168, 644 };
 
 const uint16_t RAW_ON_SIZE =
-    sizeof(RAW_ON) / sizeof(RAW_ON[0]);
+  sizeof(RAW_ON) / sizeof(RAW_ON[0]);
 
 
 // ============================================================
@@ -150,6 +160,8 @@ uint8_t stringToAction(String action) {
 }
 
 
+
+
 String daysToString(uint8_t days) {
 
   String result = "";
@@ -181,6 +193,26 @@ uint8_t stringToDays(String value) {
   return result;
 }
 
+String urlencode(const String& str) {
+  String encoded = "";
+
+  const char* hex = "0123456789ABCDEF";
+
+  for (size_t i = 0; i < str.length(); i++) {
+    char c = str[i];
+
+    if (
+      (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+      encoded += c;
+    } else {
+      encoded += '%';
+      encoded += hex[(c >> 4) & 0x0F];
+      encoded += hex[c & 0x0F];
+    }
+  }
+
+  return encoded;
+}
 
 // ============================================================
 //                     PERSISTÊNCIA
@@ -193,8 +225,7 @@ void saveSchedules() {
   preferences.putBytes(
     "schedules",
     schedules,
-    sizeof(schedules)
-  );
+    sizeof(schedules));
 
   preferences.end();
 
@@ -209,8 +240,7 @@ void loadSchedules() {
   size_t size = preferences.getBytes(
     "schedules",
     schedules,
-    sizeof(schedules)
-  );
+    sizeof(schedules));
 
   preferences.end();
 
@@ -246,15 +276,19 @@ void ligarAC() {
 
   Serial.println("Enviando comando IR: LIGAR");
 
-  irsend.sendRaw(
-    RAW_ON,
-    RAW_ON_SIZE,
-    38
-  );
+  for (int i = 0; i < 10; i++) {
+
+    irsend.sendRaw(
+      RAW_ON,
+      RAW_ON_SIZE,
+      38);
+
+    delay(100);
+  }
 
   acLigado = true;
 
-  Serial.println("Comando LIGAR enviado.");
+  Serial.println("Comando LIGAR enviado 10x.");
 }
 
 
@@ -262,15 +296,19 @@ void desligarAC() {
 
   Serial.println("Enviando comando IR: DESLIGAR");
 
-  irsend.sendRaw(
-    RAW_OFF,
-    RAW_OFF_SIZE,
-    38
-  );
+  for (int i = 0; i < 10; i++) {
+
+    irsend.sendRaw(
+      RAW_OFF,
+      RAW_OFF_SIZE,
+      38);
+
+    delay(100);
+  }
 
   acLigado = false;
 
-  Serial.println("Comando DESLIGAR enviado.");
+  Serial.println("Comando DESLIGAR enviado 10x.");
 }
 
 
@@ -296,8 +334,7 @@ bool authenticated() {
   if (!server.hasHeader("X-API-Key")) {
 
     Serial.println(
-      "API: header X-API-Key ausente"
-    );
+      "API: header X-API-Key ausente");
 
     return false;
   }
@@ -324,8 +361,7 @@ bool requireAuth() {
     server.send(
       401,
       "application/json",
-      "{\"error\":\"unauthorized\"}"
-    );
+      "{\"error\":\"unauthorized\"}");
 
     return false;
   }
@@ -356,8 +392,7 @@ void handleStatus() {
       buffer,
       sizeof(buffer),
       "%Y-%m-%d %H:%M:%S",
-      &timeinfo
-    );
+      &timeinfo);
 
     currentTime = buffer;
   }
@@ -386,8 +421,7 @@ void handleStatus() {
   server.send(
     200,
     "application/json",
-    json
-  );
+    json);
 }
 
 
@@ -406,8 +440,7 @@ void handlePowerOn() {
   server.send(
     200,
     "application/json",
-    "{\"success\":true,\"power\":\"on\"}"
-  );
+    "{\"success\":true,\"power\":\"on\"}");
 }
 
 
@@ -426,8 +459,7 @@ void handlePowerOff() {
   server.send(
     200,
     "application/json",
-    "{\"success\":true,\"power\":\"off\"}"
-  );
+    "{\"success\":true,\"power\":\"off\"}");
 }
 
 
@@ -452,8 +484,7 @@ void handlePowerToggle() {
   server.send(
     200,
     "application/json",
-    json
-  );
+    json);
 }
 
 
@@ -513,8 +544,7 @@ void handleGetSchedules() {
   server.send(
     200,
     "application/json",
-    json
-  );
+    json);
 }
 
 
@@ -542,16 +572,12 @@ void handleCreateSchedule() {
     return;
   }
 
-  if (!server.hasArg("hour") ||
-      !server.hasArg("minute") ||
-      !server.hasArg("action") ||
-      !server.hasArg("days")) {
+  if (!server.hasArg("hour") || !server.hasArg("minute") || !server.hasArg("action") || !server.hasArg("days")) {
 
     server.send(
       400,
       "application/json",
-      "{\"error\":\"missing parameters\"}"
-    );
+      "{\"error\":\"missing parameters\"}");
 
     return;
   }
@@ -569,8 +595,7 @@ void handleCreateSchedule() {
     server.send(
       400,
       "application/json",
-      "{\"error\":\"invalid hour\"}"
-    );
+      "{\"error\":\"invalid hour\"}");
 
     return;
   }
@@ -581,8 +606,7 @@ void handleCreateSchedule() {
     server.send(
       400,
       "application/json",
-      "{\"error\":\"invalid minute\"}"
-    );
+      "{\"error\":\"invalid minute\"}");
 
     return;
   }
@@ -593,8 +617,7 @@ void handleCreateSchedule() {
     server.send(
       400,
       "application/json",
-      "{\"error\":\"invalid action\"}"
-    );
+      "{\"error\":\"invalid action\"}");
 
     return;
   }
@@ -605,8 +628,7 @@ void handleCreateSchedule() {
     server.send(
       400,
       "application/json",
-      "{\"error\":\"days must have 7 characters\"}"
-    );
+      "{\"error\":\"days must have 7 characters\"}");
 
     return;
   }
@@ -629,8 +651,7 @@ void handleCreateSchedule() {
     server.send(
       507,
       "application/json",
-      "{\"error\":\"schedule limit reached\"}"
-    );
+      "{\"error\":\"schedule limit reached\"}");
 
     return;
   }
@@ -686,8 +707,7 @@ void handleCreateSchedule() {
   server.send(
     201,
     "application/json",
-    json
-  );
+    json);
 }
 
 
@@ -709,8 +729,7 @@ void handleDeleteSchedule() {
     server.send(
       400,
       "application/json",
-      "{\"error\":\"missing id\"}"
-    );
+      "{\"error\":\"missing id\"}");
 
     return;
   }
@@ -724,8 +743,7 @@ void handleDeleteSchedule() {
     server.send(
       400,
       "application/json",
-      "{\"error\":\"invalid id\"}"
-    );
+      "{\"error\":\"invalid id\"}");
 
     return;
   }
@@ -739,8 +757,7 @@ void handleDeleteSchedule() {
   server.send(
     200,
     "application/json",
-    "{\"success\":true}"
-  );
+    "{\"success\":true}");
 }
 
 
@@ -1568,8 +1585,7 @@ void handleRoot() {
   server.send(
     200,
     "text/html",
-    HTML_PAGE
-  );
+    HTML_PAGE);
 }
 
 
@@ -1619,8 +1635,7 @@ void checkSchedules() {
 
     // Verifica se o dia está habilitado.
 
-    if (!(schedule.days &
-          (1 << currentDay))) {
+    if (!(schedule.days & (1 << currentDay))) {
 
       continue;
     }
@@ -1628,8 +1643,7 @@ void checkSchedules() {
 
     // Verifica horário.
 
-    if (schedule.hour != currentHour ||
-        schedule.minute != currentMinute) {
+    if (schedule.hour != currentHour || schedule.minute != currentMinute) {
 
       continue;
     }
@@ -1637,8 +1651,7 @@ void checkSchedules() {
 
     // Evita executar várias vezes no mesmo minuto.
 
-    if (schedule.lastYear == currentYear &&
-        schedule.lastYDay == currentYDay) {
+    if (schedule.lastYear == currentYear && schedule.lastYDay == currentYDay) {
 
       continue;
     }
@@ -1680,41 +1693,140 @@ void checkSchedules() {
 //                     WIFI
 // ============================================================
 
-void connectWiFi() {
+
+bool verificarPortal() {
 
   Serial.println();
+  Serial.println("======================================");
+  Serial.println("      VERIFICANDO PORTAL CATIVO");
+  Serial.println("======================================");
+  Serial.println();
 
-  Serial.print(
-    "Conectando ao Wi-Fi: "
-  );
+  Serial.println("Tentativa de resolucao DNS...");
 
-  Serial.println(WIFI_SSID);
+  IPAddress ipTeste;
 
+  if (WiFi.hostByName("connectivitycheck.gstatic.com", ipTeste)) {
+    Serial.print("DNS OK: ");
+    Serial.println(ipTeste);
+  } else {
+    Serial.println("ERRO: DNS nao conseguiu resolver o dominio.");
+    return false;
+  }
+
+  Serial.println();
+  Serial.println("Testando conexao TCP na porta 80...");
+
+  WiFiClient tcpClient;
+
+  unsigned long inicio = millis();
+
+  if (tcpClient.connect(ipTeste, 80)) {
+    Serial.println("TCP OK: conexao estabelecida!");
+    tcpClient.stop();
+  } else {
+    Serial.print("TCP FALHOU apos ");
+    Serial.print(millis() - inicio);
+    Serial.println(" ms");
+
+    return false;
+  }
+
+  Serial.println();
+  Serial.println("Testando HTTP...");
+
+  HTTPClient http;
+
+  WiFiClient client;
+
+  const char* checkUrl =
+      "http://connectivitycheck.gstatic.com/generate_204";
+
+  if (!http.begin(client, checkUrl)) {
+    Serial.println("ERRO: http.begin() falhou.");
+    return false;
+  }
+
+  http.setConnectTimeout(5000);
+  http.setTimeout(5000);
+
+  http.addHeader("User-Agent", "Mozilla/5.0");
+
+  Serial.println("Executando HTTP GET...");
+
+  int httpCode = http.GET();
+
+  Serial.print("HTTP Code: ");
+  Serial.println(httpCode);
+
+  if (httpCode > 0) {
+    Serial.println("HTTP respondeu!");
+
+    String payload = http.getString();
+
+    Serial.print("Resposta: ");
+    Serial.println(payload);
+
+    http.end();
+    return true;
+  }
+
+  Serial.print("Erro HTTP: ");
+  Serial.println(http.errorToString(httpCode));
+
+  http.end();
+
+  return false;
+}
+
+
+
+bool connectWiFi() {
+
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("      CONEXAO WI-FI UESC");
+  Serial.println("======================================");
 
   WiFi.mode(WIFI_STA);
+
+  WiFi.disconnect(true);
+  delay(500);
 
   WiFi.begin(
     WIFI_SSID,
     WIFI_PASSWORD
   );
 
+  Serial.print(
+    "Conectando ao Wi-Fi"
+  );
 
-  while (
-    WiFi.status() != WL_CONNECTED
-  ) {
+  unsigned long inicio = millis();
+
+  while (WiFi.status() != WL_CONNECTED) {
 
     delay(500);
 
     Serial.print(".");
-  }
 
+    if (millis() - inicio > 30000) {
+
+      Serial.println();
+
+      Serial.println(
+        "ERRO: timeout ao conectar ao Wi-Fi."
+      );
+
+      return false;
+    }
+  }
 
   Serial.println();
 
   Serial.println(
     "Wi-Fi conectado!"
   );
-
 
   Serial.print(
     "IP: "
@@ -1724,15 +1836,52 @@ void connectWiFi() {
     WiFi.localIP()
   );
 
-
   Serial.print(
-    "RSSI: "
+    "Gateway: "
   );
 
   Serial.println(
-    WiFi.RSSI()
+    WiFi.gatewayIP()
   );
+
+  Serial.print(
+    "DNS: "
+  );
+
+  Serial.println(
+    WiFi.dnsIP()
+  );
+
+
+  // ==========================================================
+  // PORTAL CATIVO
+  // ==========================================================
+
+  bool autenticado =
+    verificarPortal();
+
+
+  if (!autenticado) {
+
+    Serial.println();
+
+    Serial.println(
+      "ATENCAO: portal UESC nao foi autenticado."
+    );
+
+    return false;
+  }
+
+
+  Serial.println();
+
+  Serial.println(
+    "Wi-Fi pronto para uso."
+  );
+
+  return true;
 }
+
 
 
 // ============================================================
@@ -1747,38 +1896,47 @@ void setupTime() {
     NTP_SERVER
   );
 
-
   Serial.println(
     "Sincronizando horário..."
   );
 
-
   struct tm timeinfo;
 
+  unsigned long inicio = millis();
 
-  while (
-    !getLocalTime(&timeinfo)
-  ) {
+  while (!getLocalTime(&timeinfo)) {
 
     Serial.print(".");
 
     delay(500);
-  }
 
+    // Timeout de 20 segundos
+    if (millis() - inicio >= 20000) {
+
+      Serial.println();
+      Serial.println(
+        "AVISO: Nao foi possivel sincronizar o horario."
+      );
+
+      Serial.println(
+        "O ESP32 continuara executando."
+      );
+
+      return;
+    }
+  }
 
   Serial.println();
 
   Serial.println(
-    "Horário sincronizado!"
+    "Horario sincronizado!"
   );
-
 
   Serial.println(
     &timeinfo,
     "%d/%m/%Y %H:%M:%S"
   );
 }
-
 
 // ============================================================
 //                     API ROUTES
@@ -1796,8 +1954,7 @@ void setupRoutes() {
 
   server.collectHeaders(
     headerKeys,
-    1
-  );
+    1);
 
 
   // ==========================================================
@@ -1807,8 +1964,7 @@ void setupRoutes() {
   server.on(
     "/",
     HTTP_GET,
-    handleRoot
-  );
+    handleRoot);
 
 
   // ==========================================================
@@ -1818,8 +1974,7 @@ void setupRoutes() {
   server.on(
     "/status",
     HTTP_GET,
-    handleStatus
-  );
+    handleStatus);
 
 
   // ==========================================================
@@ -1829,8 +1984,7 @@ void setupRoutes() {
   server.on(
     "/power/on",
     HTTP_POST,
-    handlePowerOn
-  );
+    handlePowerOn);
 
 
   // ==========================================================
@@ -1840,8 +1994,7 @@ void setupRoutes() {
   server.on(
     "/power/off",
     HTTP_POST,
-    handlePowerOff
-  );
+    handlePowerOff);
 
 
   // ==========================================================
@@ -1851,8 +2004,7 @@ void setupRoutes() {
   server.on(
     "/power/toggle",
     HTTP_POST,
-    handlePowerToggle
-  );
+    handlePowerToggle);
 
 
   // ==========================================================
@@ -1862,22 +2014,19 @@ void setupRoutes() {
   server.on(
     "/schedules",
     HTTP_GET,
-    handleGetSchedules
-  );
+    handleGetSchedules);
 
 
   server.on(
     "/schedule",
     HTTP_POST,
-    handleCreateSchedule
-  );
+    handleCreateSchedule);
 
 
   server.on(
     "/schedule",
     HTTP_DELETE,
-    handleDeleteSchedule
-  );
+    handleDeleteSchedule);
 
 
   // ==========================================================
@@ -1885,13 +2034,10 @@ void setupRoutes() {
   // ==========================================================
 
   server.onNotFound([]() {
-
     server.send(
       404,
       "application/json",
-      "{\"error\":\"not found\"}"
-    );
-
+      "{\"error\":\"not found\"}");
   });
 
 
@@ -1902,8 +2048,7 @@ void setupRoutes() {
   server.begin();
 
   Serial.println(
-    "Servidor HTTP iniciado."
-  );
+    "Servidor HTTP iniciado.");
 }
 
 
@@ -1929,19 +2074,28 @@ void setup() {
   irsend.begin();
 
   Serial.println(
-    "Emissor IR inicializado."
-  );
+    "Emissor IR inicializado.");
 
 
   // Wi-Fi
 
-  connectWiFi();
+bool wifiOK = connectWiFi();
 
-
-  // NTP
+if (wifiOK) {
 
   setupTime();
 
+} else {
+
+  Serial.println();
+  Serial.println(
+    "Wi-Fi/portal ainda nao esta pronto."
+  );
+
+  Serial.println(
+    "O ESP32 continuara executando."
+  );
+}
 
   // Memória
 
@@ -1951,16 +2105,13 @@ void setup() {
   // mDNS
 
   if (
-    MDNS.begin("ac-controller")
-  ) {
+    MDNS.begin("ac-controller")) {
 
     Serial.println(
-      "mDNS disponível:"
-    );
+      "mDNS disponível:");
 
     Serial.println(
-      "http://ac-controller.local"
-    );
+      "http://ac-controller.local");
   }
 
 
@@ -1973,12 +2124,10 @@ void setup() {
   Serial.println("==============================");
 
   Serial.print(
-    "Painel: http://"
-  );
+    "Painel: http://");
 
   Serial.println(
-    WiFi.localIP()
-  );
+    WiFi.localIP());
 
   Serial.println(
     "==============================");
@@ -2002,8 +2151,7 @@ void loop() {
 
 
   if (
-    millis() - lastScheduleCheck >= 1000
-  ) {
+    millis() - lastScheduleCheck >= 1000) {
 
     lastScheduleCheck =
       millis();
@@ -2019,27 +2167,24 @@ void loop() {
 
 
   if (
-    millis() - lastWiFiCheck >= 10000
-  ) {
+    millis() - lastWiFiCheck >= 10000) {
 
     lastWiFiCheck =
       millis();
 
 
-    if (
-      WiFi.status() != WL_CONNECTED
-    ) {
+  if (WiFi.status() != WL_CONNECTED) {
 
-      Serial.println(
-        "Wi-Fi desconectado. Reconectando..."
-      );
+  Serial.println(
+    "Wi-Fi desconectado. Reconectando..."
+  );
 
-      WiFi.disconnect();
+  bool wifiOK = connectWiFi();
 
-      WiFi.begin(
-        WIFI_SSID,
-        WIFI_PASSWORD
-      );
-    }
+  if (wifiOK) {
+
+    setupTime();
+  }
+}
   }
 }
