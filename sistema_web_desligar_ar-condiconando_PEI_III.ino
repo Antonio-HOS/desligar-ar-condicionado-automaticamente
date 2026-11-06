@@ -3,10 +3,12 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <time.h>
 
 #include <IRremoteESP8266.h>
 #include <IRsend.h>
+#include <ir_Tcl.h>  // Protocolo TCL112AC (ar-condicionado TCL)
 
 // ============================================================
 //                     CONFIGURAÇÕES
@@ -14,70 +16,91 @@
 
 // ---------------- Wi-Fi ----------------
 
-// const char* WIFI_SSID     = "AP102";
-// const char* WIFI_PASSWORD = "Hacker@1959";
-
 const char* WIFI_SSID = "Uesc2";
 const char* WIFI_PASSWORD = "Uesc@Convidado";
-
 
 // Portal cativo UESC
 const char* WIFI_USERNAME = "01202320094";
 const char* WIFI_USER_PASSWORD = "@PC2026.2";
 
-
 // ---------------- API ----------------
 
-// Troque esta senha.
+// Troque esta senha (e a do HTML abaixo, const API_KEY no <script>).
 const char* API_KEY = "123456";
 
 // ---------------- NTP ----------------
 
 const char* NTP_SERVER = "pool.ntp.org";
-
 const long GMT_OFFSET_SEC = -10800;  // UTC-3
 const int DAYLIGHT_OFFSET_SEC = 0;
+
+// ---------------- Rede / timeouts ----------------
+
+const uint16_t HTTP_TIMEOUT_MS = 8000;            // 3000 era curto demais (log: -1 em exatos 3 s)
+const uint16_t PORTAL_TIMEOUT_MS = 8000;          // roda em task propria: nao trava mais a interface
+const unsigned long WIFI_RETRY_MS = 30000;        // reinicia tentativa de Wi-Fi
+const unsigned long NET_CHECK_OK_MS = 60000;      // checa internet a cada 60 s se estiver ok
+const unsigned long NET_CHECK_FAIL_MS = 15000;    // tenta reautenticar a cada 15 s se falhar
+
+// URLs de teste de conectividade (mesmas do Windows)
+const char* URL_CONNECT_TEST = "http://www.msftconnecttest.com/connecttest.txt";
+const char* URL_REDIRECT_TEST = "http://www.msftconnecttest.com/redirect";
 
 // ---------------- IR ----------------
 
 const uint16_t IR_LED_PIN = 4;
+const uint8_t IR_REPEATS = 1;           // antes: 10
+const uint16_t IR_REPEAT_DELAY_MS = 40; // antes: 100
 
-IRsend irsend(IR_LED_PIN);
+// Temperatura/modo usados ao LIGAR (o DESLIGAR manda o mesmo estado,
+// apenas com o bit Power apagado, igual ao controle original TCL).
+const float TCL_TEMPERATURA_C = 24.0;  // ajuste aqui: 16 a 31 °C (passos de 0,5)
 
+IRTcl112Ac acTcl(IR_LED_PIN);  // Emissor IR já no protocolo TCL112AC
 
 // ============================================================
 //                     COMANDOS IR
 // ============================================================
 
 // ------------------------------------------------------------
-// COMANDO DESLIGAR
+// CODIGOS DO CONTROLE TCL - Protocolo TCL112AC (112 bits, 38 kHz)
 // ------------------------------------------------------------
-
-const uint16_t RAW_OFF[] = { 3110, 1592, 498, 1064, 524, 1064, 526, 288, 528, 290, 530, 290, 530, 1064, 524, 290, 530, 290, 530, 1064, 522, 1064, 524, 290, 530, 1064, 524, 292, 528, 290, 530, 1062, 524, 1064, 522, 290, 530, 1064, 524, 1066, 522, 290, 530, 290, 530, 1064, 522, 290, 530, 290, 530, 290, 530, 1064, 522, 290, 530, 288, 530, 292, 528, 290, 530, 290, 530, 290, 530, 290, 530, 290, 530, 288, 530, 290, 530, 290, 528, 290, 530, 290, 530, 290, 530, 290, 530, 290, 530, 290, 530, 288, 530, 290, 530, 290, 530, 1048, 538, 290, 528, 290, 530, 290, 530, 290, 530, 288, 530, 290, 530, 290, 530, 1044, 542, 1064, 524, 288, 530, 290, 530, 290, 530, 1090, 498, 1088, 498, 290, 530, 290, 530, 1088, 500, 1088, 498, 1090, 498, 290, 530, 290, 530, 1088, 498, 1090, 498, 288, 530, 1090, 498, 288, 532, 288, 532, 288, 530, 290, 530, 290, 530, 290, 530, 290, 528, 290, 530, 170, 648, 136, 684, 156, 662, 134, 686, 162, 658, 160, 660, 164, 654, 156, 662, 164, 632, 220, 598, 228, 594, 158, 660, 226, 594, 230, 588, 230, 590, 230, 588, 324, 496, 322, 496, 324, 494, 238, 582, 322, 496, 324, 496, 324, 494, 326, 494, 324, 496, 324, 496, 324, 496, 324, 494, 1094, 494, 1092, 494, 1092, 494, 324, 496 };
-
-
-
-const uint16_t RAW_OFF_SIZE =
-  sizeof(RAW_OFF) / sizeof(RAW_OFF[0]);
-
-
-
-
-// ------------------------------------------------------------
-// COMANDO LIGAR
-// ------------------------------------------------------------
+// Compativel com os ar-condicionados TCL que usam esse protocolo,
+// ex.: linha TAC-09/12/18/24CHSD, TAC-09CHSA e controles GYKQ-52.
+// (Se o aparelho for da linha com controle GYKQ-58, o protocolo e
+//  o TCL96AC e estes estados nao servem - precisa capturar o
+//  controle original com um receptor IR.)
 //
-// ATENÇÃO:
-// Neste momento estou usando o mesmo comando como exemplo.
+// O controle TCL nao manda "teclas" isoladas: manda o ESTADO
+// COMPLETO do aparelho (14 bytes). LIGAR e DESLIGAR sao o mesmo
+// estado, mudando so o bit Power (byte 5) e o checksum (byte 13):
 //
-// Você deve substituir RAW_ON pelo vetor capturado quando
-// pressionar o botão de LIGAR no controle original.
-// ------------------------------------------------------------
+//   Byte 0-2 : 23 CB 26  -> cabecalho fixo TCL
+//   Byte 3   : 01        -> tipo de mensagem (normal)
+//   Byte 5   : 24 = LIGADO  |  20 = DESLIGADO   (bit 2 = Power)
+//   Byte 6   : 03        -> modo Cool (resfriar)
+//   Byte 7   : 07        -> 24 C  (temp = 31 - 7)
+//   Byte 8   : 40        -> ventilador automatico
+//   Byte 12  : 80        -> marca TCL (modelo TAC09CHSD)
+//   Byte 13  : checksum  -> soma dos bytes 0-12 (& 0xFF),
+//                           recalculado pela biblioteca no envio
+//
+// Fonte dos estados (estado conhecido/bom da biblioteca
+// IRremoteESP8266, capturado de controle TCL real):
+//   LIGAR    : 23 CB 26 01 00 24 03 07 40 00 00 00 80 03
+//   DESLIGAR : 23 CB 26 01 00 20 03 07 40 00 00 00 80 FF
 
-const uint16_t RAW_ON[] = { 3088, 1618, 472, 1094, 494, 1094, 494, 326, 494, 324, 494, 326, 494, 1092, 494, 326, 494, 326, 494, 1094, 494, 1094, 494, 326, 494, 1094, 494, 326, 494, 326, 494, 1094, 494, 1094, 494, 326, 494, 1094, 494, 1094, 494, 326, 494, 326, 494, 1094, 494, 326, 494, 324, 494, 326, 494, 1094, 494, 326, 494, 326, 494, 326, 494, 326, 494, 326, 494, 326, 494, 326, 494, 324, 494, 324, 494, 326, 494, 324, 494, 324, 496, 324, 494, 324, 494, 326, 494, 324, 494, 324, 496, 324, 494, 324, 496, 324, 496, 1092, 494, 324, 494, 326, 494, 324, 496, 324, 496, 324, 498, 322, 494, 326, 494, 1092, 494, 1094, 494, 324, 496, 324, 494, 324, 494, 1092, 494, 1092, 496, 324, 496, 324, 496, 1092, 494, 1094, 494, 1094, 496, 324, 496, 324, 496, 1092, 496, 1092, 496, 328, 492, 1092, 494, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 494, 324, 496, 324, 496, 324, 496, 324, 496, 324, 494, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 494, 324, 496, 326, 494, 324, 496, 324, 496, 322, 496, 324, 496, 324, 496, 324, 496, 324, 496, 322, 496, 324, 496, 324, 496, 324, 496, 324, 496, 324, 496, 322, 496, 324, 496, 228, 592, 1114, 474, 1114, 474, 1114, 474, 168, 644 };
+// COMANDO LIGAR - Cool, 24 C, ventilador automatico
+const uint8_t TCL_LIGAR[] = {
+  0x23, 0xCB, 0x26, 0x01, 0x00, 0x24, 0x03, 0x07,
+  0x40, 0x00, 0x00, 0x00, 0x80, 0x03
+};
 
-const uint16_t RAW_ON_SIZE =
-  sizeof(RAW_ON) / sizeof(RAW_ON[0]);
+// COMANDO DESLIGAR - mesmo estado, bit Power apagado (byte 5: 0x20)
+const uint8_t TCL_DESLIGAR[] = {
+  0x23, 0xCB, 0x26, 0x01, 0x00, 0x20, 0x03, 0x07,
+  0x40, 0x00, 0x00, 0x00, 0x80, 0xFF
+};
 
 
 // ============================================================
@@ -85,16 +108,27 @@ const uint16_t RAW_ON_SIZE =
 // ============================================================
 
 WebServer server(80);
-
 Preferences preferences;
 
-
 // ============================================================
-//                     ESTADO DO AC
+//                     ESTADO
 // ============================================================
 
 bool acLigado = false;
 
+// Comando IR pendente: é enviado no loop(), DEPOIS de responder o HTTP.
+// -1 = nenhum, 0 = desligar, 1 = ligar
+volatile int8_t pendingIR = -1;
+
+// Estado de rede (mexido pela task de rede no nucleo 0 e lido no loop)
+bool wifiConnecting = false;
+bool mdnsStarted = false;
+bool ntpConfigured = false;
+volatile bool internetOK = false;
+unsigned long wifiStartMs = 0;
+unsigned long wifiConnectedAtMs = 0;  // quando o Wi-Fi conectou (espera o DHCP estabilizar)
+unsigned long wifiDownSinceMs = 0;    // desde quando esta caido (debounce p/ reconectar)
+unsigned long lastNetCheckMs = 0;
 
 // ============================================================
 //                     AGENDAMENTOS
@@ -103,106 +137,56 @@ bool acLigado = false;
 #define MAX_SCHEDULES 10
 
 struct Schedule {
-
   bool active;
-
   uint8_t hour;
   uint8_t minute;
-
-  // Ação:
-  // 0 = OFF
-  // 1 = ON
-  uint8_t action;
-
-  // Dias da semana:
-  //
-  // bit 0 = domingo
-  // bit 1 = segunda
-  // bit 2 = terça
-  // bit 3 = quarta
-  // bit 4 = quinta
-  // bit 5 = sexta
-  // bit 6 = sábado
-  //
-  uint8_t days;
-
-  // Último dia em que o agendamento foi executado.
+  uint8_t action;  // 0 = OFF, 1 = ON
+  uint8_t days;    // bit 0 = domingo ... bit 6 = sábado
   int lastYear;
   int lastYDay;
 };
 
 Schedule schedules[MAX_SCHEDULES];
 
-
 // ============================================================
 //                     UTILITÁRIOS
 // ============================================================
 
 String actionToString(uint8_t action) {
-
-  if (action == 1) {
-    return "on";
-  }
-
-  return "off";
+  return action == 1 ? "on" : "off";
 }
-
 
 uint8_t stringToAction(String action) {
-
   action.toLowerCase();
-
-  if (action == "on") {
-    return 1;
-  }
-
-  return 0;
+  return action == "on" ? 1 : 0;
 }
 
-
-
-
 String daysToString(uint8_t days) {
-
   String result = "";
-
   for (int i = 0; i < 7; i++) {
-
-    if (days & (1 << i)) {
-      result += "1";
-    } else {
-      result += "0";
-    }
+    result += (days & (1 << i)) ? "1" : "0";
   }
-
   return result;
 }
 
-
 uint8_t stringToDays(String value) {
-
   uint8_t result = 0;
-
-  for (int i = 0; i < 7 && i < value.length(); i++) {
-
+  for (int i = 0; i < 7 && i < (int)value.length(); i++) {
     if (value[i] == '1') {
       result |= (1 << i);
     }
   }
-
   return result;
 }
 
-String urlencode(const String& str) {
+String urlEncode(const String& value) {
   String encoded = "";
-
   const char* hex = "0123456789ABCDEF";
 
-  for (size_t i = 0; i < str.length(); i++) {
-    char c = str[i];
+  for (size_t i = 0; i < value.length(); i++) {
+    char c = value[i];
 
-    if (
-      (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
       encoded += c;
     } else {
       encoded += '%';
@@ -214,42 +198,31 @@ String urlencode(const String& str) {
   return encoded;
 }
 
+// Hora local SEM bloquear (getLocalTime padrão espera até 5 s!)
+bool getTimeNow(struct tm* info) {
+  return getLocalTime(info, 0);
+}
+
 // ============================================================
 //                     PERSISTÊNCIA
 // ============================================================
 
 void saveSchedules() {
-
   preferences.begin("ac-controller", false);
-
-  preferences.putBytes(
-    "schedules",
-    schedules,
-    sizeof(schedules));
-
+  preferences.putBytes("schedules", schedules, sizeof(schedules));
   preferences.end();
-
   Serial.println("Agendamentos salvos.");
 }
 
-
 void loadSchedules() {
-
   preferences.begin("ac-controller", true);
-
-  size_t size = preferences.getBytes(
-    "schedules",
-    schedules,
-    sizeof(schedules));
-
+  size_t size = preferences.getBytes("schedules", schedules, sizeof(schedules));
   preferences.end();
 
   if (size != sizeof(schedules)) {
-
     Serial.println("Nenhum agendamento salvo.");
 
     for (int i = 0; i < MAX_SCHEDULES; i++) {
-
       schedules[i].active = false;
       schedules[i].hour = 0;
       schedules[i].minute = 0;
@@ -262,504 +235,267 @@ void loadSchedules() {
     saveSchedules();
 
   } else {
-
     Serial.println("Agendamentos carregados da memória.");
+
+    // lastYear/lastYDay só vivem em RAM
+    for (int i = 0; i < MAX_SCHEDULES; i++) {
+      schedules[i].lastYear = -1;
+      schedules[i].lastYDay = -1;
+    }
   }
 }
-
 
 // ============================================================
 //                     CONTROLE IR
 // ============================================================
 
-void ligarAC() {
+void enviarIR(bool ligar) {
+  Serial.println(ligar ? "Enviando IR (TCL): LIGAR" : "Enviando IR (TCL): DESLIGAR");
 
-  Serial.println("Enviando comando IR: LIGAR");
+  // Carrega o estado TCL correspondente e reaplica as configuracoes.
+  // setTemp/setMode/setFan ajustam os bytes e a biblioteca recalcula
+  // o checksum (byte 13) na hora do envio: nao precisa mexer na mao.
+  acTcl.setRaw(ligar ? TCL_LIGAR : TCL_DESLIGAR);
+  acTcl.setMode(kTcl112AcCool);        // Resfriar
+  acTcl.setTemp(TCL_TEMPERATURA_C);    // 24 °C (TCL_TEMPERATURA_C)
+  acTcl.setFan(kTcl112AcFanAuto);      // Ventilador automatico
+  acTcl.setPower(ligar);               // Bit Power (byte 5)
 
-  for (int i = 0; i < 10; i++) {
+  Serial.println("Estado TCL: " + acTcl.toString());
 
-    irsend.sendRaw(
-      RAW_ON,
-      RAW_ON_SIZE,
-      38);
-
-    delay(100);
+  for (int i = 0; i < IR_REPEATS; i++) {
+    acTcl.send();  // TCL112AC: header 3000/1650 us, 112 bits, 38 kHz
+    delay(IR_REPEAT_DELAY_MS);
   }
-
-  acLigado = true;
-
-  Serial.println("Comando LIGAR enviado 10x.");
 }
 
+// Usado pelos agendamentos (executa na hora)
+void ligarAC() {
+  enviarIR(true);
+  acLigado = true;
+}
 
 void desligarAC() {
-
-  Serial.println("Enviando comando IR: DESLIGAR");
-
-  for (int i = 0; i < 10; i++) {
-
-    irsend.sendRaw(
-      RAW_OFF,
-      RAW_OFF_SIZE,
-      38);
-
-    delay(100);
-  }
-
+  enviarIR(false);
   acLigado = false;
-
-  Serial.println("Comando DESLIGAR enviado 10x.");
 }
 
-
-void toggleAC() {
-
-  if (acLigado) {
-
-    desligarAC();
-
-  } else {
-
-    ligarAC();
-  }
+// Usado pela API: atualiza o estado e agenda o envio para depois da resposta HTTP
+void solicitarAC(bool ligar) {
+  acLigado = ligar;
+  pendingIR = ligar ? 1 : 0;
 }
 
+void processarIRPendente() {
+  if (pendingIR < 0) return;
+
+  int8_t cmd = pendingIR;
+  pendingIR = -1;
+
+  enviarIR(cmd == 1);
+}
 
 // ============================================================
 //                     AUTENTICAÇÃO
 // ============================================================
 
 bool authenticated() {
-
   if (!server.hasHeader("X-API-Key")) {
-
-    Serial.println(
-      "API: header X-API-Key ausente");
-
     return false;
   }
-
-  String key =
-    server.header("X-API-Key");
-
-  Serial.print("API Key recebida: [");
-  Serial.print(key);
-  Serial.println("]");
-
-  Serial.print("API Key esperada: [");
-  Serial.print(API_KEY);
-  Serial.println("]");
-
-  return key == API_KEY;
+  return server.header("X-API-Key") == API_KEY;
 }
 
-
 bool requireAuth() {
-
   if (!authenticated()) {
-
-    server.send(
-      401,
-      "application/json",
-      "{\"error\":\"unauthorized\"}");
-
+    server.send(401, "application/json", "{\"error\":\"unauthorized\"}");
     return false;
   }
-
   return true;
 }
 
-
 // ============================================================
-//                     API STATUS
+//                     API
 // ============================================================
 
 void handleStatus() {
-
-  if (!requireAuth()) {
-    return;
-  }
+  if (!requireAuth()) return;
 
   struct tm timeinfo;
-
   String currentTime = "";
 
-  if (getLocalTime(&timeinfo)) {
-
+  if (getTimeNow(&timeinfo)) {
     char buffer[30];
-
-    strftime(
-      buffer,
-      sizeof(buffer),
-      "%Y-%m-%d %H:%M:%S",
-      &timeinfo);
-
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &timeinfo);
     currentTime = buffer;
   }
 
   String json = "{";
-
   json += "\"power\":\"";
   json += acLigado ? "on" : "off";
   json += "\",";
-
   json += "\"wifi\":true,";
-
+  json += "\"internet\":";
+  json += internetOK ? "true" : "false";
+  json += ",";
   json += "\"ip\":\"";
   json += WiFi.localIP().toString();
   json += "\",";
-
   json += "\"time\":\"";
   json += currentTime;
   json += "\",";
-
   json += "\"schedules\":";
   json += String(MAX_SCHEDULES);
-
   json += "}";
 
-  server.send(
-    200,
-    "application/json",
-    json);
+  server.send(200, "application/json", json);
 }
-
-
-// ============================================================
-//                     API POWER ON
-// ============================================================
 
 void handlePowerOn() {
+  if (!requireAuth()) return;
 
-  if (!requireAuth()) {
-    return;
-  }
-
-  ligarAC();
-
-  server.send(
-    200,
-    "application/json",
-    "{\"success\":true,\"power\":\"on\"}");
+  server.send(200, "application/json", "{\"success\":true,\"power\":\"on\"}");
+  solicitarAC(true);  // IR é enviado no loop, depois da resposta
 }
-
-
-// ============================================================
-//                     API POWER OFF
-// ============================================================
 
 void handlePowerOff() {
+  if (!requireAuth()) return;
 
-  if (!requireAuth()) {
-    return;
-  }
-
-  desligarAC();
-
-  server.send(
-    200,
-    "application/json",
-    "{\"success\":true,\"power\":\"off\"}");
+  server.send(200, "application/json", "{\"success\":true,\"power\":\"off\"}");
+  solicitarAC(false);
 }
-
-
-// ============================================================
-//                     API TOGGLE
-// ============================================================
 
 void handlePowerToggle() {
+  if (!requireAuth()) return;
 
-  if (!requireAuth()) {
-    return;
-  }
-
-  toggleAC();
+  bool novoEstado = !acLigado;
 
   String json = "{\"success\":true,\"power\":\"";
-
-  json += acLigado ? "on" : "off";
-
+  json += novoEstado ? "on" : "off";
   json += "\"}";
 
-  server.send(
-    200,
-    "application/json",
-    json);
+  server.send(200, "application/json", json);
+  solicitarAC(novoEstado);
 }
 
-
-// ============================================================
-//                     GET SCHEDULES
-// ============================================================
-
 void handleGetSchedules() {
-
-  if (!requireAuth()) {
-    return;
-  }
+  if (!requireAuth()) return;
 
   String json = "[";
-
   bool first = true;
 
   for (int i = 0; i < MAX_SCHEDULES; i++) {
+    if (!schedules[i].active) continue;
 
-    if (!schedules[i].active) {
-      continue;
-    }
-
-    if (!first) {
-      json += ",";
-    }
-
+    if (!first) json += ",";
     first = false;
 
     json += "{";
-
-    json += "\"id\":";
-    json += String(i);
-    json += ",";
-
-    json += "\"hour\":";
-    json += String(schedules[i].hour);
-    json += ",";
-
-    json += "\"minute\":";
-    json += String(schedules[i].minute);
-    json += ",";
-
-    json += "\"action\":\"";
-    json += actionToString(schedules[i].action);
-    json += "\",";
-
-    json += "\"days\":\"";
-    json += daysToString(schedules[i].days);
-    json += "\"";
-
+    json += "\"id\":" + String(i) + ",";
+    json += "\"hour\":" + String(schedules[i].hour) + ",";
+    json += "\"minute\":" + String(schedules[i].minute) + ",";
+    json += "\"action\":\"" + actionToString(schedules[i].action) + "\",";
+    json += "\"days\":\"" + daysToString(schedules[i].days) + "\"";
     json += "}";
   }
 
   json += "]";
 
-  server.send(
-    200,
-    "application/json",
-    json);
+  server.send(200, "application/json", json);
 }
 
-
-// ============================================================
-//                     CREATE SCHEDULE
-// ============================================================
-//
-// Exemplo:
-//
 // POST /schedule?hour=18&minute=0&action=off&days=0111110
-//
-// days:
-// domingo = posição 0
-// segunda = posição 1
-// ...
-// sábado = posição 6
-//
-// 0111110 = segunda a sexta
-// 1111111 = todos os dias
-// ============================================================
-
 void handleCreateSchedule() {
-
-  if (!requireAuth()) {
-    return;
-  }
+  if (!requireAuth()) return;
 
   if (!server.hasArg("hour") || !server.hasArg("minute") || !server.hasArg("action") || !server.hasArg("days")) {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"missing parameters\"}");
-
+    server.send(400, "application/json", "{\"error\":\"missing parameters\"}");
     return;
   }
-
 
   int hour = server.arg("hour").toInt();
   int minute = server.arg("minute").toInt();
-
   String action = server.arg("action");
   String days = server.arg("days");
 
-
   if (hour < 0 || hour > 23) {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"invalid hour\"}");
-
+    server.send(400, "application/json", "{\"error\":\"invalid hour\"}");
     return;
   }
-
 
   if (minute < 0 || minute > 59) {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"invalid minute\"}");
-
+    server.send(400, "application/json", "{\"error\":\"invalid minute\"}");
     return;
   }
-
 
   if (action != "on" && action != "off") {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"invalid action\"}");
-
+    server.send(400, "application/json", "{\"error\":\"invalid action\"}");
     return;
   }
-
 
   if (days.length() != 7) {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"days must have 7 characters\"}");
-
+    server.send(400, "application/json", "{\"error\":\"days must have 7 characters\"}");
     return;
   }
-
 
   int slot = -1;
 
   for (int i = 0; i < MAX_SCHEDULES; i++) {
-
     if (!schedules[i].active) {
-
       slot = i;
       break;
     }
   }
 
-
   if (slot == -1) {
-
-    server.send(
-      507,
-      "application/json",
-      "{\"error\":\"schedule limit reached\"}");
-
+    server.send(507, "application/json", "{\"error\":\"schedule limit reached\"}");
     return;
   }
-
 
   schedules[slot].active = true;
-
   schedules[slot].hour = hour;
-
   schedules[slot].minute = minute;
-
-  schedules[slot].action =
-    stringToAction(action);
-
-  schedules[slot].days =
-    stringToDays(days);
-
+  schedules[slot].action = stringToAction(action);
+  schedules[slot].days = stringToDays(days);
   schedules[slot].lastYear = -1;
-
   schedules[slot].lastYDay = -1;
 
-
-  saveSchedules();
-
-
   String json = "{";
-
   json += "\"success\":true,";
-
-  json += "\"id\":";
-  json += String(slot);
-  json += ",";
-
-  json += "\"hour\":";
-  json += String(hour);
-  json += ",";
-
-  json += "\"minute\":";
-  json += String(minute);
-  json += ",";
-
-  json += "\"action\":\"";
-  json += action;
-  json += "\",";
-
-  json += "\"days\":\"";
-  json += days;
-  json += "\"";
-
+  json += "\"id\":" + String(slot) + ",";
+  json += "\"hour\":" + String(hour) + ",";
+  json += "\"minute\":" + String(minute) + ",";
+  json += "\"action\":\"" + action + "\",";
+  json += "\"days\":\"" + days + "\"";
   json += "}";
 
+  server.send(201, "application/json", json);
 
-  server.send(
-    201,
-    "application/json",
-    json);
+  saveSchedules();  // grava na flash depois de responder
 }
 
-
-// ============================================================
-//                     DELETE SCHEDULE
-// ============================================================
-//
 // DELETE /schedule?id=0
-// ============================================================
-
 void handleDeleteSchedule() {
-
-  if (!requireAuth()) {
-    return;
-  }
+  if (!requireAuth()) return;
 
   if (!server.hasArg("id")) {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"missing id\"}");
-
+    server.send(400, "application/json", "{\"error\":\"missing id\"}");
     return;
   }
-
 
   int id = server.arg("id").toInt();
 
-
   if (id < 0 || id >= MAX_SCHEDULES) {
-
-    server.send(
-      400,
-      "application/json",
-      "{\"error\":\"invalid id\"}");
-
+    server.send(400, "application/json", "{\"error\":\"invalid id\"}");
     return;
   }
 
-
   schedules[id].active = false;
 
+  server.send(200, "application/json", "{\"success\":true}");
+
   saveSchedules();
-
-
-  server.send(
-    200,
-    "application/json",
-    "{\"success\":true}");
 }
-
 
 // ============================================================
 //                     WEB INTERFACE
@@ -810,13 +546,8 @@ button {
     transition: transform .18s ease, box-shadow .18s ease, opacity .18s ease;
 }
 
-button:hover {
-    transform: translateY(-1px);
-}
-
-button:active {
-    transform: translateY(0);
-}
+button:hover { transform: translateY(-1px); }
+button:active { transform: translateY(0); }
 
 .container {
     width: min(100% - 28px, 820px);
@@ -999,7 +730,6 @@ button:active {
 }
 
 .field { margin-bottom: 15px; }
-
 .field.full { grid-column: 1 / -1; }
 
 label.field-label {
@@ -1033,9 +763,7 @@ input[type="number"]:focus, select:focus {
     gap: 7px;
 }
 
-.day {
-    position: relative;
-}
+.day { position: relative; }
 
 .day input {
     position: absolute;
@@ -1161,9 +889,7 @@ input[type="number"]:focus, select:focus {
     transition: transform .25s ease;
 }
 
-.toast.show {
-    transform: translate(-50%, 0);
-}
+.toast.show { transform: translate(-50%, 0); }
 
 .footer {
     padding: 2px 0 0;
@@ -1178,13 +904,8 @@ input[type="number"]:focus, select:focus {
         padding-top: 18px;
     }
 
-    .header {
-        align-items: flex-start;
-    }
-
-    .connection {
-        padding: 8px 10px;
-    }
+    .header { align-items: flex-start; }
+    .connection { padding: 8px 10px; }
 
     .status-panel {
         grid-template-columns: 1fr auto;
@@ -1197,26 +918,18 @@ input[type="number"]:focus, select:focus {
         font-size: 28px;
     }
 
-    .controls {
-        grid-template-columns: 1fr;
-    }
+    .controls { grid-template-columns: 1fr; }
 
     .form-grid {
         grid-template-columns: 1fr;
         gap: 0;
     }
 
-    .field.full {
-        grid-column: auto;
-    }
+    .field.full { grid-column: auto; }
 
-    .days {
-        grid-template-columns: repeat(4, 1fr);
-    }
+    .days { grid-template-columns: repeat(4, 1fr); }
 
-    .schedule {
-        grid-template-columns: auto 1fr;
-    }
+    .schedule { grid-template-columns: auto 1fr; }
 
     .schedule .delete {
         grid-column: 1 / -1;
@@ -1307,34 +1020,13 @@ input[type="number"]:focus, select:focus {
                 <label class="field-label">DIAS DA SEMANA</label>
 
                 <div class="days">
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="0">
-                        <span>DOM</span>
-                    </label>
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="1" checked>
-                        <span>SEG</span>
-                    </label>
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="2" checked>
-                        <span>TER</span>
-                    </label>
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="3" checked>
-                        <span>QUA</span>
-                    </label>
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="4" checked>
-                        <span>QUI</span>
-                    </label>
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="5" checked>
-                        <span>SEX</span>
-                    </label>
-                    <label class="day">
-                        <input type="checkbox" class="dayInput" value="6">
-                        <span>SÁB</span>
-                    </label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="0"><span>DOM</span></label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="1" checked><span>SEG</span></label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="2" checked><span>TER</span></label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="3" checked><span>QUA</span></label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="4" checked><span>QUI</span></label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="5" checked><span>SEX</span></label>
+                    <label class="day"><input type="checkbox" class="dayInput" value="6"><span>SÁB</span></label>
                 </div>
             </div>
         </div>
@@ -1362,20 +1054,29 @@ input[type="number"]:focus, select:focus {
 
 <script>
 const API_KEY = "123456";
+const API_TIMEOUT_MS = 6000;
 
 async function api(url, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
     options.headers = {
         ...(options.headers || {}),
         "X-API-Key": API_KEY
     };
+    options.signal = controller.signal;
 
-    const response = await fetch(url, options);
+    try {
+        const response = await fetch(url, options);
 
-    if (!response.ok) {
-        throw new Error("HTTP " + response.status);
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status);
+        }
+
+        return await response.json();
+    } finally {
+        clearTimeout(timer);
     }
-
-    return await response.json();
 }
 
 function showToast(message) {
@@ -1395,7 +1096,12 @@ function setButtonsLoading(loading) {
     });
 }
 
+let statusBusy = false;
+
 async function updateStatus() {
+    if (statusBusy) return;
+    statusBusy = true;
+
     try {
         const data = await api("/status");
 
@@ -1418,6 +1124,8 @@ async function updateStatus() {
 
         document.getElementById("clock").textContent =
             "Não foi possível conectar ao ESP32";
+    } finally {
+        statusBusy = false;
     }
 }
 
@@ -1425,7 +1133,7 @@ async function power(action) {
     setButtonsLoading(true);
 
     try {
-        await api("/power/" + action, { method: "POST" });
+        const data = await api("/power/" + action, { method: "POST" });
 
         const labels = {
             on: "Ar-condicionado ligado",
@@ -1434,7 +1142,14 @@ async function power(action) {
         };
 
         showToast(labels[action] || "Comando enviado");
-        await updateStatus();
+
+        // Atualiza a tela na hora com a resposta, sem esperar outra requisição
+        const value = document.getElementById("statusValue");
+        const isOn = data.power === "on";
+        value.className = "status-value " + (isOn ? "on" : "off");
+        value.innerHTML =
+            '<span class="status-dot"></span>' +
+            '<span>' + (isOn ? "LIGADO" : "DESLIGADO") + '</span>';
 
     } catch (error) {
         showToast("Erro ao enviar comando");
@@ -1575,367 +1290,554 @@ setInterval(updateStatus, 10000);
 </html>
 )rawliteral";
 
-
-// ============================================================
-//                     PÁGINA PRINCIPAL
-// ============================================================
-
 void handleRoot() {
-
-  server.send(
-    200,
-    "text/html",
-    HTML_PAGE);
+  server.send(200, "text/html", HTML_PAGE);
 }
-
 
 // ============================================================
 //                     VERIFICAR AGENDAMENTOS
 // ============================================================
 
 void checkSchedules() {
-
   struct tm timeinfo;
 
-  if (!getLocalTime(&timeinfo)) {
-
+  if (!getTimeNow(&timeinfo)) {
     return;
   }
 
-
-  int currentHour =
-    timeinfo.tm_hour;
-
-  int currentMinute =
-    timeinfo.tm_min;
-
-
-  int currentDay =
-    timeinfo.tm_wday;
-
-
-  int currentYear =
-    timeinfo.tm_year + 1900;
-
-
-  int currentYDay =
-    timeinfo.tm_yday;
-
+  int currentHour = timeinfo.tm_hour;
+  int currentMinute = timeinfo.tm_min;
+  int currentDay = timeinfo.tm_wday;
+  int currentYear = timeinfo.tm_year + 1900;
+  int currentYDay = timeinfo.tm_yday;
 
   for (int i = 0; i < MAX_SCHEDULES; i++) {
+    Schedule& schedule = schedules[i];
 
-    Schedule& schedule =
-      schedules[i];
+    if (!schedule.active) continue;
+    if (!(schedule.days & (1 << currentDay))) continue;
+    if (schedule.hour != currentHour || schedule.minute != currentMinute) continue;
 
-
-    if (!schedule.active) {
-      continue;
-    }
-
-
-    // Verifica se o dia está habilitado.
-
-    if (!(schedule.days & (1 << currentDay))) {
-
-      continue;
-    }
-
-
-    // Verifica horário.
-
-    if (schedule.hour != currentHour || schedule.minute != currentMinute) {
-
-      continue;
-    }
-
-
-    // Evita executar várias vezes no mesmo minuto.
-
-    if (schedule.lastYear == currentYear && schedule.lastYDay == currentYDay) {
-
-      continue;
-    }
-
+    // Evita executar várias vezes no mesmo minuto
+    if (schedule.lastYear == currentYear && schedule.lastYDay == currentYDay) continue;
 
     Serial.println();
-    Serial.println("==============================");
     Serial.println("AGENDAMENTO EXECUTADO");
-    Serial.println("==============================");
-
 
     if (schedule.action == 1) {
-
       Serial.println("Ação: LIGAR");
-
       ligarAC();
-
     } else {
-
       Serial.println("Ação: DESLIGAR");
-
       desligarAC();
     }
 
-
-    schedule.lastYear =
-      currentYear;
-
-    schedule.lastYDay =
-      currentYDay;
-
-
-    saveSchedules();
+    // Só em RAM: não grava na flash a cada execução
+    schedule.lastYear = currentYear;
+    schedule.lastYDay = currentYDay;
   }
 }
 
-
 // ============================================================
-//                     WIFI
+//                     PORTAL CATIVO / INTERNET
 // ============================================================
 
-
-bool verificarPortal() {
-
-  Serial.println();
-  Serial.println("======================================");
-  Serial.println("      VERIFICANDO PORTAL CATIVO");
-  Serial.println("======================================");
-  Serial.println();
-
-  Serial.println("Tentativa de resolucao DNS...");
-
-  IPAddress ipTeste;
-
-  if (WiFi.hostByName("connectivitycheck.gstatic.com", ipTeste)) {
-    Serial.print("DNS OK: ");
-    Serial.println(ipTeste);
-  } else {
-    Serial.println("ERRO: DNS nao conseguiu resolver o dominio.");
-    return false;
-  }
-
-  Serial.println();
-  Serial.println("Testando conexao TCP na porta 80...");
-
-  WiFiClient tcpClient;
-
-  unsigned long inicio = millis();
-
-  if (tcpClient.connect(ipTeste, 80)) {
-    Serial.println("TCP OK: conexao estabelecida!");
-    tcpClient.stop();
-  } else {
-    Serial.print("TCP FALHOU apos ");
-    Serial.print(millis() - inicio);
-    Serial.println(" ms");
-
-    return false;
-  }
-
-  Serial.println();
-  Serial.println("Testando HTTP...");
-
+// Retorna true se há internet de verdade (sem portal interceptando).
+bool temInternet() {
+  WiFiClient client;
   HTTPClient http;
 
-  WiFiClient client;
-
-  const char* checkUrl =
-      "http://connectivitycheck.gstatic.com/generate_204";
-
-  if (!http.begin(client, checkUrl)) {
-    Serial.println("ERRO: http.begin() falhou.");
+  if (!http.begin(client, URL_CONNECT_TEST)) {
     return false;
   }
 
-  http.setConnectTimeout(5000);
-  http.setTimeout(5000);
-
+  http.setConnectTimeout(HTTP_TIMEOUT_MS);
+  http.setTimeout(HTTP_TIMEOUT_MS);
   http.addHeader("User-Agent", "Mozilla/5.0");
 
-  Serial.println("Executando HTTP GET...");
+  int code = http.GET();
+  bool ok = false;
+
+  if (code == 200) {
+    String body = http.getString();
+    // Portais cativos às vezes respondem 200 com a página de login
+    ok = body.startsWith("Microsoft Connect Test");
+  }
+
+  http.end();
+
+  return ok;
+}
+
+// Extrai o MAGIC de um Location/corpo FortiGate:
+//   .../fgtauth?1a2b3c...   ou   ...?magic=1a2b3c...   ou   ...?1a2b3c...
+String extrairMagic(const String& texto) {
+  String trecho = "";
+  // Formulario de login: <input name="magic" value="abcd1234...">
+  int nome = texto.indexOf("\"magic\"");
+  if (nome >= 0) {
+    int v = texto.indexOf("value=\"", nome);
+    if (v >= 0 && v - nome < 80) trecho = texto.substring(v + 7);
+  }
+  if (trecho.length() == 0) {
+    int fg = texto.indexOf("fgtauth?");
+    if (fg >= 0) {
+      trecho = texto.substring(fg + 8);
+    } else {
+      int mg = texto.indexOf("magic=");
+      if (mg >= 0) {
+        trecho = texto.substring(mg + 6);
+      } else {
+        int q = texto.indexOf('?');
+        if (q < 0) return "";
+        trecho = texto.substring(q + 1);
+      }
+    }
+  }
+  // O magic e' alfanumerico: corta em aspas, '&', espaco, '<', etc.
+  String magic = "";
+  for (size_t i = 0; i < trecho.length(); i++) {
+    char c = trecho[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_') {
+      magic += c;
+    } else {
+      break;
+    }
+  }
+  return magic;
+}
+
+// GET numa URL de teste SEM seguir o redirect. Retorna true se achou o MAGIC.
+// Antes da autenticacao o DNS externo pode falhar/atrasar, por isso o
+// chamador tenta primeiro uma URL por IP literal (dispensa DNS).
+bool tentarObterMagic(const String& urlTeste, String& magicOut, String& locationOut) {
+  WiFiClient client;
+  HTTPClient http;
+  http.setReuse(false);
+
+  if (!http.begin(client, urlTeste)) {
+    Serial.println("[Portal] http.begin falhou: " + urlTeste);
+    return false;
+  }
+
+  http.setConnectTimeout(PORTAL_TIMEOUT_MS);
+  http.setTimeout(PORTAL_TIMEOUT_MS);
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+
+  const char* headers[] = { "Location" };
+  http.collectHeaders(headers, 1);
+  http.addHeader("User-Agent", "Mozilla/5.0");
+  http.addHeader("Cache-Control", "no-cache");
 
   int httpCode = http.GET();
 
-  Serial.print("HTTP Code: ");
-  Serial.println(httpCode);
+  // -1 = HTTPC_ERROR_CONNECTION_FAILED (conexao/DNS/timeout), nao e' resposta HTTP!
+  Serial.printf("[Portal] GET %s -> %d (%s)\n", urlTeste.c_str(), httpCode,
+                http.errorToString(httpCode).c_str());
 
-  if (httpCode > 0) {
-    Serial.println("HTTP respondeu!");
-
-    String payload = http.getString();
-
-    Serial.print("Resposta: ");
-    Serial.println(payload);
-
+  if (httpCode <= 0) {
     http.end();
-    return true;
+    return false;
   }
 
-  Serial.print("Erro HTTP: ");
-  Serial.println(http.errorToString(httpCode));
-
+  locationOut = http.header("Location");
+  String body = http.getString();  // portais as vezes mandam o magic no corpo (meta-refresh/JS)
   http.end();
+
+  if (locationOut.length() > 0) {
+    Serial.println("[Portal] Location: " + locationOut);
+    magicOut = extrairMagic(locationOut);
+    if (magicOut.length() > 0) return true;
+  }
+
+  if (body.length() > 0) {
+    Serial.println("[Portal] Corpo (" + String(body.length()) + " bytes): " +
+                   body.substring(0, 300));
+    // No corpo so' aceita fgtauth/magic explicitos, senao um '?' qualquer
+    // de uma pagina comum viraria um magic falso.
+    if (body.indexOf("fgtauth") >= 0 || body.indexOf("magic=") >= 0) {
+      magicOut = extrairMagic(body);
+      if (magicOut.length() > 0) return true;
+    }
+  }
 
   return false;
 }
 
+// Igual a tentarObterMagic(), mas via HTTPS (certificado nao verificado).
+// Necessario porque o firewall da UESC esta RECUSANDO (RST) o HTTP externo
+// em vez de redirecionar: pode ser que ele so' intercepte HTTPS, ou que o
+// portal so' atenda em https://gateway:1003/.
+bool tentarObterMagicHttps(const String& urlTeste, String& magicOut, String& locationOut) {
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  http.setReuse(false);
 
-
-bool connectWiFi() {
-
-  Serial.println();
-  Serial.println("======================================");
-  Serial.println("      CONEXAO WI-FI UESC");
-  Serial.println("======================================");
-
-  WiFi.mode(WIFI_STA);
-
-  WiFi.disconnect(true);
-  delay(500);
-
-  WiFi.begin(
-    WIFI_SSID,
-    WIFI_PASSWORD
-  );
-
-  Serial.print(
-    "Conectando ao Wi-Fi"
-  );
-
-  unsigned long inicio = millis();
-
-  while (WiFi.status() != WL_CONNECTED) {
-
-    delay(500);
-
-    Serial.print(".");
-
-    if (millis() - inicio > 30000) {
-
-      Serial.println();
-
-      Serial.println(
-        "ERRO: timeout ao conectar ao Wi-Fi."
-      );
-
-      return false;
-    }
-  }
-
-  Serial.println();
-
-  Serial.println(
-    "Wi-Fi conectado!"
-  );
-
-  Serial.print(
-    "IP: "
-  );
-
-  Serial.println(
-    WiFi.localIP()
-  );
-
-  Serial.print(
-    "Gateway: "
-  );
-
-  Serial.println(
-    WiFi.gatewayIP()
-  );
-
-  Serial.print(
-    "DNS: "
-  );
-
-  Serial.println(
-    WiFi.dnsIP()
-  );
-
-
-  // ==========================================================
-  // PORTAL CATIVO
-  // ==========================================================
-
-  bool autenticado =
-    verificarPortal();
-
-
-  if (!autenticado) {
-
-    Serial.println();
-
-    Serial.println(
-      "ATENCAO: portal UESC nao foi autenticado."
-    );
-
+  if (!http.begin(client, urlTeste)) {
+    Serial.println("[Portal] http.begin (HTTPS) falhou: " + urlTeste);
     return false;
   }
 
+  http.setConnectTimeout(PORTAL_TIMEOUT_MS);
+  http.setTimeout(PORTAL_TIMEOUT_MS);
+  http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
-  Serial.println();
+  const char* headers[] = { "Location" };
+  http.collectHeaders(headers, 1);
+  http.addHeader("User-Agent", "Mozilla/5.0");
+  http.addHeader("Cache-Control", "no-cache");
 
-  Serial.println(
-    "Wi-Fi pronto para uso."
-  );
+  int httpCode = http.GET();
+  Serial.printf("[Portal] GET %s -> %d (%s)\n", urlTeste.c_str(), httpCode,
+                http.errorToString(httpCode).c_str());
 
-  return true;
-}
+  if (httpCode <= 0) {
+    http.end();
+    return false;
+  }
 
+  locationOut = http.header("Location");
+  String body = http.getString();
+  http.end();
 
+  if (locationOut.length() > 0) {
+    Serial.println("[Portal] Location: " + locationOut);
+    magicOut = extrairMagic(locationOut);
+    if (magicOut.length() > 0) return true;
+  }
 
-// ============================================================
-//                     NTP
-// ============================================================
-
-void setupTime() {
-
-  configTime(
-    GMT_OFFSET_SEC,
-    DAYLIGHT_OFFSET_SEC,
-    NTP_SERVER
-  );
-
-  Serial.println(
-    "Sincronizando horário..."
-  );
-
-  struct tm timeinfo;
-
-  unsigned long inicio = millis();
-
-  while (!getLocalTime(&timeinfo)) {
-
-    Serial.print(".");
-
-    delay(500);
-
-    // Timeout de 20 segundos
-    if (millis() - inicio >= 20000) {
-
-      Serial.println();
-      Serial.println(
-        "AVISO: Nao foi possivel sincronizar o horario."
-      );
-
-      Serial.println(
-        "O ESP32 continuara executando."
-      );
-
-      return;
+  if (body.length() > 0) {
+    Serial.println("[Portal] Corpo (" + String(body.length()) + " bytes): " +
+                   body.substring(0, 300));
+    if (body.indexOf("fgtauth") >= 0 || body.indexOf("magic") >= 0) {
+      magicOut = extrairMagic(body);
+      if (magicOut.length() > 0) return true;
     }
   }
 
+  return false;
+}
+
+bool verificarPortal() {
+  // Se o Wi-Fi caiu no meio da tentativa anterior, nem tenta: era isso que
+  // gerava o "Gateway: 0.0.0.0" logo depois do "Wi-Fi conectado!".
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[Portal] Wi-Fi nao esta conectado. Abortando tentativa.");
+    return false;
+  }
+
   Serial.println();
+  Serial.println("=== PORTAL CATIVO UESC ===");
 
-  Serial.println(
-    "Horario sincronizado!"
-  );
+  IPAddress gateway = WiFi.gatewayIP();
 
-  Serial.println(
-    &timeinfo,
-    "%d/%m/%Y %H:%M:%S"
-  );
+  Serial.print("Gateway: ");
+  Serial.println(gateway);
+  Serial.print("Mascara: ");
+  Serial.println(WiFi.subnetMask());
+  Serial.print("DNS: ");
+  Serial.println(WiFi.dnsIP());
+
+  if (gateway == IPAddress(0, 0, 0, 0)) {
+    Serial.println("ERRO: gateway nao foi obtido.");
+    return false;
+  }
+
+  // Diagnostico: se o DNS externo nao resolver, e' esperado antes do login;
+  // nesse caso so' a URL por IP consegue provocar o redirect do FortiGate.
+  IPAddress ipTeste;
+  if (WiFi.hostByName("www.msftconnecttest.com", ipTeste) == 1) {
+    Serial.print("[Portal] DNS msftconnecttest.com -> ");
+    Serial.println(ipTeste);
+  } else {
+    Serial.println("[Portal] DNS externo NAO resolveu (normal antes de autenticar).");
+  }
+
+  const String redirectOriginal = URL_REDIRECT_TEST;
+
+  // ---- 1. Descobre o MAGIC pelo redirect do FortiGate ----
+  // Ordem: IP literal (sem DNS) -> redirect Microsoft -> Google -> neverssl.
+  const char* urlsTeste[] = {
+    "http://1.1.1.1/",
+    URL_REDIRECT_TEST,
+    "http://connectivitycheck.gstatic.com/generate_204",
+    "http://neverssl.com/"
+  };
+
+  String magic = "";
+  String location = "";
+
+  for (int i = 0; i < 4 && magic.length() == 0; i++) {
+    tentarObterMagic(urlsTeste[i], magic, location);
+    if (magic.length() == 0) delay(1000);  // respira entre tentativas
+  }
+
+  // HTTP externo recusado (-1 em tudo)? Tenta disparar o portal via HTTPS.
+  if (magic.length() == 0) {
+    Serial.println("[Portal] HTTP externo nao gerou redirect. Tentando HTTPS...");
+    tentarObterMagicHttps("https://1.1.1.1/", magic, location);
+    if (magic.length() == 0) {
+      tentarObterMagicHttps("https://connectivitycheck.gstatic.com/generate_204", magic, location);
+    }
+  }
+
+  // Ainda nada? Sonda o proprio gateway nas portas classicas do FortiGate.
+  // Mesmo sem magic, o corpo/Location dessas respostas revela a URL real
+  // do portal (anote no log e confira no navegador do celular/notebook).
+  if (magic.length() == 0) {
+    Serial.println("[Portal] Sondando o gateway diretamente...");
+    String gw = gateway.toString();
+    tentarObterMagic("http://" + gw + ":1000/", magic, location);
+    if (magic.length() == 0) tentarObterMagicHttps("https://" + gw + ":1003/", magic, location);
+    if (magic.length() == 0) tentarObterMagic("http://" + gw + "/", magic, location);
+    if (magic.length() == 0) tentarObterMagicHttps("https://" + gw + "/", magic, location);
+  }
+
+  if (magic.length() == 0) {
+    Serial.println("ERRO: nao foi possivel obter o MAGIC (veja os GET acima).");
+    Serial.println("Dica: -1 repetido = portal nao interceptou a conexao ou DNS/timeout;");
+    Serial.println("      200 sem fgtauth = pagina diferente da esperada (veja o corpo).");
+    return false;
+  }
+
+  Serial.print("MAGIC: ");
+  Serial.println(magic);
+
+  // ---- 2. POST de autenticacao ----
+  // Deriva esquema/host/porta do Location real (ex.: https://gw:1003/fgtauth?...)
+  // em vez de assumir sempre http://gateway:1000/.
+  String postURL = "http://" + gateway.toString() + ":1000/";
+  bool usaHttps = false;
+
+  if (location.startsWith("https://")) {
+    usaHttps = true;
+    int barra = location.indexOf('/', 8);
+    if (barra >= 0) postURL = location.substring(0, barra + 1);
+  } else if (location.startsWith("http://")) {
+    int barra = location.indexOf('/', 7);
+    if (barra >= 0) postURL = location.substring(0, barra + 1);
+  }
+
+  Serial.println("[Portal] POST em: " + postURL + (usaHttps ? " (HTTPS, certificado nao verificado)" : ""));
+
+  String postData =
+    "4Tredir=" + urlEncode(redirectOriginal) + "&magic=" + urlEncode(magic) + "&username=" + urlEncode(WIFI_USERNAME) + "&password=" + urlEncode(WIFI_USER_PASSWORD);
+
+  int authCode = -1;
+  String authBody = "";
+  String authErro = "";
+
+  if (usaHttps) {
+    WiFiClientSecure authClient;
+    authClient.setInsecure();  // portal interno: certificado autoassinado / da instituicao
+    HTTPClient authHttp;
+    if (!authHttp.begin(authClient, postURL)) {
+      Serial.println("ERRO: nao foi possivel conectar ao portal (HTTPS).");
+      return false;
+    }
+    authHttp.setConnectTimeout(PORTAL_TIMEOUT_MS);
+    authHttp.setTimeout(PORTAL_TIMEOUT_MS);
+    authHttp.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    authHttp.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    authHttp.addHeader("User-Agent", "Mozilla/5.0");
+    Serial.println("Enviando autenticacao...");
+    authCode = authHttp.POST(postData);
+    authErro = authHttp.errorToString(authCode);
+    if (authCode > 0) authBody = authHttp.getString();
+    authHttp.end();
+  } else {
+    WiFiClient authClient;
+    HTTPClient authHttp;
+    if (!authHttp.begin(authClient, postURL)) {
+      Serial.println("ERRO: nao foi possivel conectar ao portal.");
+      return false;
+    }
+    authHttp.setConnectTimeout(PORTAL_TIMEOUT_MS);
+    authHttp.setTimeout(PORTAL_TIMEOUT_MS);
+    authHttp.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    authHttp.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    authHttp.addHeader("User-Agent", "Mozilla/5.0");
+    Serial.println("Enviando autenticacao...");
+    authCode = authHttp.POST(postData);
+    authErro = authHttp.errorToString(authCode);
+    if (authCode > 0) authBody = authHttp.getString();
+    authHttp.end();
+  }
+
+  Serial.printf("[Portal] Resposta do POST: %d (%s)\n", authCode, authErro.c_str());
+  if (authBody.length() > 0) {
+    Serial.println("[Portal] Corpo da resposta: " + authBody.substring(0, 300));
+  }
+
+  if (authCode <= 0) {
+    Serial.println("ERRO: POST de autenticacao nao chegou ao portal.");
+    return false;
+  }
+
+  // 301/302/303 e' o sucesso classico, mas alguns portais respondem 200.
+  // Quem confirma de verdade e' o teste de internet abaixo.
+  if (authCode != 301 && authCode != 302 && authCode != 303 && authCode != 200) {
+    Serial.println("Resposta inesperada do portal (seguindo para confirmar internet).");
+  }
+
+  // ---- 3. Confirma que a internet foi liberada ----
+
+  delay(1500);
+
+  bool ok = temInternet();
+
+  Serial.println(ok ? "PORTAL AUTENTICADO! INTERNET LIBERADA" : "ATENCAO: autenticacao nao confirmada.");
+
+  return ok;
+}
+
+// ============================================================
+//                     REDE (NÃO BLOQUEANTE)
+// ============================================================
+
+// Lista todos os APs com o SSID da UESC visiveis daqui, do mais forte ao
+// mais fraco. Se existir outro BSSID bem mais forte que o D4:76:A0:8C:EB:7A
+// atual, o problema e' o ESP estar preso no AP errado/longe.
+void escanearAPs() {
+  Serial.printf("[WiFi-scan] Escaneando redes (procurando '%s')...\n", WIFI_SSID);
+  int n = WiFi.scanNetworks(false, false);
+  if (n <= 0) {
+    Serial.println("[WiFi-scan] Nenhuma rede encontrada.");
+    return;
+  }
+  int achados = 0;
+  for (int i = 0; i < n; i++) {
+    if (WiFi.SSID(i) != WIFI_SSID) continue;
+    achados++;
+    Serial.printf("[WiFi-scan] %s | RSSI=%d dBm | BSSID=%s | canal=%d\n",
+                  WiFi.SSID(i).c_str(), (int)WiFi.RSSI(i),
+                  WiFi.BSSIDstr(i).c_str(), (int)WiFi.channel(i));
+  }
+  if (achados == 0) Serial.printf("[WiFi-scan] Nenhum AP '%s' visivel daqui.\n", WIFI_SSID);
+  WiFi.scanDelete();
+}
+
+void iniciarWiFi() {
+  Serial.println("Conectando ao Wi-Fi (em segundo plano)...");
+
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  wifiConnecting = true;
+  wifiStartMs = millis();
+}
+
+void networkTick() {
+  unsigned long now = millis();
+
+  // ---- Sem Wi-Fi ----
+  if (WiFi.status() != WL_CONNECTED) {
+    internetOK = false;
+
+    if (wifiConnecting) {
+      if (now - wifiStartMs > WIFI_RETRY_MS) {
+        Serial.println("Timeout no Wi-Fi. Tentando novamente...");
+        WiFi.disconnect();
+        iniciarWiFi();
+      }
+    } else {
+      // Estava conectado e caiu: espera 5 s antes de forcar WiFi.begin().
+      // Quedas curtas o proprio setAutoReconnect(true) resolve; chamar
+      // begin() na hora so' atrapalha e gerava o loop de reconexao do log.
+      // O MOTIVO da queda aparece na linha "[WiFi-event] Desconectado".
+      if (wifiDownSinceMs == 0) {
+        wifiDownSinceMs = now;
+        Serial.println("Wi-Fi caiu. Aguardando 5 s (auto-reconnect)...");
+      } else if (now - wifiDownSinceMs > 5000) {
+        wifiDownSinceMs = 0;
+        iniciarWiFi();
+      }
+    }
+
+    return;
+  }
+
+  // ---- Com Wi-Fi ----
+  if (wifiConnecting || wifiConnectedAtMs == 0) {
+    wifiConnecting = false;
+    wifiDownSinceMs = 0;
+    wifiConnectedAtMs = now;
+
+    Serial.println("Wi-Fi conectado!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Gateway: ");
+    Serial.println(WiFi.gatewayIP());
+    // RSSI/BSSID/canal sao decisivos p/ interpretar o reason=34 (LOW_ACK):
+    // RSSI >= -65 otimo | -70 a -80 fraco | < -80 o enlace cai com trafego.
+    // Anote o BSSID: com varios APs "Uesc2", o ESP pode estar preso num longe.
+    Serial.printf("[WiFi] RSSI=%d dBm | BSSID=%s | canal=%d\n",
+                  (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str(), (int)WiFi.channel());
+
+    lastNetCheckMs = 0;  // força checagem de internet imediata
+  }
+
+  // Qualidade do enlace a cada 15 s (enquanto conectado)
+  {
+    static unsigned long lastRssiLogMs = 0;
+    if (now - wifiConnectedAtMs >= 3000 && now - lastRssiLogMs >= 15000) {
+      lastRssiLogMs = now;
+      Serial.printf("[WiFi] RSSI=%d dBm | BSSID=%s | canal=%d | uptime Wi-Fi=%lu s\n",
+                    (int)WiFi.RSSI(), WiFi.BSSIDstr().c_str(), (int)WiFi.channel(),
+                    (unsigned long)((now - wifiConnectedAtMs) / 1000));
+    }
+  }
+
+  // DHCP pode anunciar WL_CONNECTED antes de IP/gateway validos (era o
+  // "Gateway: 0.0.0.0" 1 s apos conectar). Espera estabilizar.
+  if (now - wifiConnectedAtMs < 3000) return;
+  if (WiFi.localIP() == IPAddress(0, 0, 0, 0) || WiFi.gatewayIP() == IPAddress(0, 0, 0, 0)) {
+    return;
+  }
+
+  if (!mdnsStarted) {
+    if (MDNS.begin("ac-controller")) {
+      mdnsStarted = true;
+      Serial.println("mDNS: http://ac-controller.local");
+    }
+  }
+
+  if (!ntpConfigured) {
+    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
+    ntpConfigured = true;
+    Serial.println("NTP configurado (sincroniza em segundo plano).");
+  }
+
+  // ---- Checagem periódica de internet / reautenticação ----
+  unsigned long interval = internetOK ? NET_CHECK_OK_MS : NET_CHECK_FAIL_MS;
+
+  if (lastNetCheckMs != 0 && now - lastNetCheckMs < interval) {
+    return;
+  }
+
+  lastNetCheckMs = now;
+
+  if (temInternet()) {
+    internetOK = true;
+    return;
+  }
+
+  Serial.println("Sem internet. Tentando autenticar no portal...");
+
+  internetOK = verificarPortal();
+}
+
+// Task de rede no nucleo 0 (o loop/Arduino roda no nucleo 1).
+// verificarPortal() BLOQUEIA por dezenas de segundos (varios GETs com
+// timeout). Rodando aqui, o server.handleClient() do loop() nunca para:
+// era esse bloqueio que fazia a interface "abrir e fechar" no navegador.
+void networkTask(void* param) {
+  (void)param;
+  for (;;) {
+    networkTick();
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
 }
 
 // ============================================================
@@ -1943,248 +1845,113 @@ void setupTime() {
 // ============================================================
 
 void setupRoutes() {
+  const char* headerKeys[] = { "X-API-Key" };
+  server.collectHeaders(headerKeys, 1);
 
-  // ==========================================================
-  // Headers que o servidor deve coletar
-  // ==========================================================
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/status", HTTP_GET, handleStatus);
 
-  const char* headerKeys[] = {
-    "X-API-Key"
-  };
+  server.on("/power/on", HTTP_POST, handlePowerOn);
+  server.on("/power/off", HTTP_POST, handlePowerOff);
+  server.on("/power/toggle", HTTP_POST, handlePowerToggle);
 
-  server.collectHeaders(
-    headerKeys,
-    1);
-
-
-  // ==========================================================
-  // Página web
-  // ==========================================================
-
-  server.on(
-    "/",
-    HTTP_GET,
-    handleRoot);
-
-
-  // ==========================================================
-  // Status
-  // ==========================================================
-
-  server.on(
-    "/status",
-    HTTP_GET,
-    handleStatus);
-
-
-  // ==========================================================
-  // Power ON
-  // ==========================================================
-
-  server.on(
-    "/power/on",
-    HTTP_POST,
-    handlePowerOn);
-
-
-  // ==========================================================
-  // Power OFF
-  // ==========================================================
-
-  server.on(
-    "/power/off",
-    HTTP_POST,
-    handlePowerOff);
-
-
-  // ==========================================================
-  // Toggle
-  // ==========================================================
-
-  server.on(
-    "/power/toggle",
-    HTTP_POST,
-    handlePowerToggle);
-
-
-  // ==========================================================
-  // Agendamentos
-  // ==========================================================
-
-  server.on(
-    "/schedules",
-    HTTP_GET,
-    handleGetSchedules);
-
-
-  server.on(
-    "/schedule",
-    HTTP_POST,
-    handleCreateSchedule);
-
-
-  server.on(
-    "/schedule",
-    HTTP_DELETE,
-    handleDeleteSchedule);
-
-
-  // ==========================================================
-  // Página inexistente
-  // ==========================================================
+  server.on("/schedules", HTTP_GET, handleGetSchedules);
+  server.on("/schedule", HTTP_POST, handleCreateSchedule);
+  server.on("/schedule", HTTP_DELETE, handleDeleteSchedule);
 
   server.onNotFound([]() {
-    server.send(
-      404,
-      "application/json",
-      "{\"error\":\"not found\"}");
+    server.send(404, "application/json", "{\"error\":\"not found\"}");
   });
-
-
-  // ==========================================================
-  // Inicia servidor
-  // ==========================================================
 
   server.begin();
 
-  Serial.println(
-    "Servidor HTTP iniciado.");
+  Serial.println("Servidor HTTP iniciado.");
 }
-
 
 // ============================================================
 //                     SETUP
 // ============================================================
 
 void setup() {
-
   Serial.begin(115200);
-
-  delay(1000);
-
+  delay(500);
 
   Serial.println();
   Serial.println("==============================");
   Serial.println("      AC CONTROLLER ESP32");
   Serial.println("==============================");
 
-
-  // IR
-
-  irsend.begin();
-
-  Serial.println(
-    "Emissor IR inicializado.");
-
-
-  // Wi-Fi
-
-bool wifiOK = connectWiFi();
-
-if (wifiOK) {
-
-  setupTime();
-
-} else {
-
-  Serial.println();
-  Serial.println(
-    "Wi-Fi/portal ainda nao esta pronto."
-  );
-
-  Serial.println(
-    "O ESP32 continuara executando."
-  );
-}
+  // IR (TCL112AC)
+  acTcl.begin();
+  Serial.println("Emissor IR inicializado (TCL112AC, pino " + String(IR_LED_PIN) + ").");
 
   // Memória
-
   loadSchedules();
 
+  // Wi-Fi: configura, mas NÃO espera conectar
+  WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);  // reduz latência das respostas HTTP
+  // Com RSSI em -81/-84 dBm (limite do radio), baixar a potencia so' piora:
+  // o AP mal ouve o ESP e os ACKs se perdem (reason=34). Usa o maximo.
+  // Pre-requisito: fonte decente (carregador 5 V/1 A+), nao USB de PC.
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);
+  Serial.printf("Potencia TX Wi-Fi: %.1f dBm\n", WiFi.getTxPower());
 
-  // mDNS
+  // Registra o MOTIVO de cada queda (reason): sem isso, status=6 nao diz nada.
+  // 2=AUTH_EXPIRE 3=AUTH_LEAVE 4=ASSOC_EXPIRE 6=NOT_AUTHED 7=NOT_ASSOCED
+  // 8=ASSOC_LEAVE (AP expulsou / nosso WiFi.disconnect()) 15=4WAY_TIMEOUT
+  // 34=DISASSOC_LOW_ACK (AP nao confirma os quadros: sinal fraco, AP longe,
+  //    antena obstruida ou fonte caindo no TX) 200=BEACON_TIMEOUT
+  // 201=NO_AP_FOUND 202=AUTH_FAIL 204=HANDSHAKE_TIMEOUT 205=CONNECTION_FAIL
+  // 0/8 logo apos "Timeout no Wi-Fi" sao provocados pelo nosso disconnect().
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      Serial.printf("[WiFi-event] Desconectado. Motivo (reason) = %d\n",
+                    (int)info.wifi_sta_disconnected.reason);
+    } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      Serial.print("[WiFi-event] IP obtido: ");
+      Serial.println(WiFi.localIP());
+    }
+  });
 
-  if (
-    MDNS.begin("ac-controller")) {
+  escanearAPs();  // diagnostico: quais APs Uesc2 existem e com que forca
+  iniciarWiFi();
 
-    Serial.println(
-      "mDNS disponível:");
-
-    Serial.println(
-      "http://ac-controller.local");
-  }
-
-
-  // API
-
+  // Servidor sobe imediatamente
   setupRoutes();
 
+  // Rede/portal passam a rodar no nucleo 0, sem travar a interface web
+  xTaskCreatePinnedToCore(networkTask, "networkTask", 16384, NULL, 1, NULL, 0);
+  Serial.println("Task de rede iniciada (nucleo 0).");
 
-  Serial.println();
-  Serial.println("==============================");
-
-  Serial.print(
-    "Painel: http://");
-
-  Serial.println(
-    WiFi.localIP());
-
-  Serial.println(
-    "==============================");
+  Serial.println("Sistema pronto. Rede conectando em segundo plano.");
 }
-
 
 // ============================================================
 //                     LOOP
 // ============================================================
 
 void loop() {
-
-  // Processa requisições HTTP
-
+  // Requisições HTTP
   server.handleClient();
 
+  // Envia IR pendente (depois que o HTTP já respondeu)
+  processarIRPendente();
 
-  // Verifica agendamentos
-
+  // Agendamentos
   static unsigned long lastScheduleCheck = 0;
 
-
-  if (
-    millis() - lastScheduleCheck >= 1000) {
-
-    lastScheduleCheck =
-      millis();
-
-
+  if (millis() - lastScheduleCheck >= 1000) {
+    lastScheduleCheck = millis();
     checkSchedules();
   }
 
+  // Wi-Fi / portal / NTP / mDNS: rodam na networkTask (nucleo 0).
+  // NAO chamar networkTick() aqui: verificarPortal() bloqueia por
+  // dezenas de segundos e congelava server.handleClient() (a tela abria
+  // e "fechava" porque o /status parava de responder).
 
-  // Reconecta Wi-Fi se cair
-
-  static unsigned long lastWiFiCheck = 0;
-
-
-  if (
-    millis() - lastWiFiCheck >= 10000) {
-
-    lastWiFiCheck =
-      millis();
-
-
-  if (WiFi.status() != WL_CONNECTED) {
-
-  Serial.println(
-    "Wi-Fi desconectado. Reconectando..."
-  );
-
-  bool wifiOK = connectWiFi();
-
-  if (wifiOK) {
-
-    setupTime();
-  }
-}
-  }
+  delay(2);  // nao girar em vazio: alimenta o watchdog e economiza CPU
 }
